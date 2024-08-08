@@ -1,151 +1,105 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import plotly.express as px
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+def load_excel_file(uploaded_file):
+    if uploaded_file is not None:
+        try:
+            df = pd.read_excel(uploaded_file)
+            return df
+        except Exception as e:
+            st.error(f"Fehler beim Lesen der Excel-Datei: {e}")
+    return None
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+def process_datetime(df, date_column):
+    try:
+        df[date_column] = pd.to_datetime(df[date_column])
+        return df
+    except Exception as e:
+        st.error(f"Fehler bei der Verarbeitung des Datums: {e}")
+        return None
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+def merge_dataframes(df1, df2, date_column):
+    merged_df = pd.merge(df1, df2, on=date_column, how='outer')
+    merged_df = merged_df.sort_values(by=date_column)
+    return merged_df
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+def analyze_data(df):
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    corr_matrix = df[numeric_cols].corr()
+    
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(df[numeric_cols])
+    pca = PCA()
+    pca_result = pca.fit_transform(scaled_data)
+    
+    return corr_matrix, pca_result, pca.explained_variance_ratio_
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+def main():
+    st.title("Qualitätsdatenanalyse für Lackieranlage")
+    
+    # File-Uploader für beide Dateien
+    env_file = st.file_uploader("Wählen Sie Ihre Excel-Datei mit Temperatur und Luftfeuchtigkeit", type=["xlsx", "xls"])
+    quality_file = st.file_uploader("Wählen Sie Ihre Excel-Datei mit Qualitätsdaten", type=["xlsx", "xls"])
+    
+    if env_file is not None and quality_file is not None:
+        env_df = load_excel_file(env_file)
+        quality_df = load_excel_file(quality_file)
+        
+        if env_df is not None and quality_df is not None:
+            st.success("Beide Dateien erfolgreich geladen!")
+            
+            # Datumsverarbeitung
+            date_column = st.selectbox("Wählen Sie die Datums-/Zeitspalte", env_df.columns)
+            env_df = process_datetime(env_df, date_column)
+            quality_df = process_datetime(quality_df, date_column)
+            
+            if env_df is not None and quality_df is not None:
+                # Zusammenführen der Dataframes
+                merged_df = merge_dataframes(env_df, quality_df, date_column)
+                
+                st.subheader("Zusammengeführte Datenübersicht")
+                st.write(merged_df.head())
+                st.write(merged_df.describe())
+                
+                # Datenanalyse
+                corr_matrix, pca_result, explained_variance = analyze_data(merged_df)
+                
+                # Korrelationsmatrix visualisieren
+                st.subheader("Korrelationsmatrix")
+                fig_corr = px.imshow(corr_matrix, color_continuous_scale='RdBu_r', aspect="auto")
+                st.plotly_chart(fig_corr)
+                
+                # PCA-Ergebnisse visualisieren
+                st.subheader("PCA-Analyse")
+                fig_pca = px.scatter(x=pca_result[:,0], y=pca_result[:,1],
+                                     labels={'x': 'Erste Hauptkomponente', 'y': 'Zweite Hauptkomponente'},
+                                     title="PCA der zusammengeführten Daten")
+                st.plotly_chart(fig_pca)
+                
+                st.write("Erklärte Varianz der ersten beiden Hauptkomponenten:", 
+                         sum(explained_variance[:2]))
+                
+                # Zeitreihenvisualisierung
+                st.subheader("Zeitreihenanalyse")
+                numeric_columns = merged_df.select_dtypes(include=[np.number]).columns
+                selected_column = st.selectbox("Wählen Sie eine Spalte für die Zeitreihenanalyse", numeric_columns)
+                
+                fig_time = px.line(merged_df, x=date_column, y=selected_column, 
+                                   title=f'Zeitreihe: {selected_column}')
+                st.plotly_chart(fig_time)
+                
+                # Streudiagramm
+                st.subheader("Streudiagramm")
+                x_axis = st.selectbox("Wählen Sie die X-Achse", numeric_columns, key='x_axis')
+                y_axis = st.selectbox("Wählen Sie die Y-Achse", numeric_columns, key='y_axis')
+                
+                fig_scatter = px.scatter(merged_df, x=x_axis, y=y_axis, 
+                                         title=f'Streudiagramm: {x_axis} vs {y_axis}')
+                st.plotly_chart(fig_scatter)
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[gdp_df['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[gdp_df['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+if __name__ == "__main__":
+    main()
